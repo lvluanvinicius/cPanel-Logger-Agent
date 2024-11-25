@@ -1,0 +1,16 @@
+[Unit]
+Description="Coletor SYSLOG do CPANEL para Access Logs."
+After=network.target
+
+[Service]
+ExecStart=/home/cednet/cpanel_logs/venv/bin/python3 /home/cednet/cpanel_logs/main.py
+WorkingDirectory=/home/cednet/cpanel_logs
+StandardOutput=journal
+StandardError=journal
+Restart=always
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
