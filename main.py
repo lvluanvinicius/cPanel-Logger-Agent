@@ -129,9 +129,15 @@ def main():
                 parsed = parse_log_line(log_message)
 
                 if parsed:
+                     # Adicionar o ano ao valor de parsed['date']
+                    log_date_str = parsed['date']  # Formato: "Nov 21 15:55:12"
+                    current_year = datetime.now().year  # Obter o ano atual
+                    log_date_with_year = f"{log_date_str} {current_year}"  # Adicionar o ano
+                                      
+                     # Adicionar ao batch
                     logs_batch.append((
                         parsed['timestamp'], parsed['server_tag'], parsed['ip_address'], parsed['user'],
-                        parsed['status_code'], parsed['url'], parsed['date'], parsed['user_agent'], parsed['hostname']
+                        parsed['status_code'], parsed['url'], log_date_with_year, parsed['user_agent'], parsed['hostname']
                     ))
 
                 # Enviar lote de logs para a fila
