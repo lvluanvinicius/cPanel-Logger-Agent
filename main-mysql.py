@@ -1,13 +1,12 @@
 import socket
-import pymongo
+import mariadb 
 import re
 import os
 from datetime import datetime
 from multiprocessing import Process, Queue
 import logging
 from dotenv import load_dotenv
-from queue import Empty
-
+from queue import Empty 
 load_dotenv()
 
 # Configuração básica do logger
@@ -17,11 +16,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'  # Formato da mensagem
 )
 
-# Configuração do banco de dados MongoDB
-mongo_config = {
-    'uri': os.getenv('MONGO_URI', 'mongodb://localhost:27017/cpanel_logs'),
-    'db_name': os.getenv('MONGO_DB_NAME', 'cpanel_logs'), # Pode ser sobrescrito pela URI
-    'collection_name': os.getenv('MONGO_COLLECTION_NAME', 'access_logs'),
+
+# Configuração do banco de dados
+db_config = {
+    'host': os.getenv('DB_HOST', 'cpanel_logs_db'),
+    'port': int(os.getenv('DB_PORT', 3306)),
+    'user': os.getenv('DB_USER', 'cpanel_logs'),
+    'password': os.getenv('DB_PASSWORD', 'password'),
+    'database': os.getenv('DB_NAME', 'cpanel_logs'),
 }
 
 # Configurar o socket UDP.
@@ -52,24 +54,22 @@ def parse_log_line(line):
         logging.error(f"Erro ao parsear linha: {e}")
     return None
 
-def connect_to_mongodb():
-    """Tenta conectar ao MongoDB e retorna o cliente e a coleção."""
+
+def reconnect_to_db():
+    """Tenta reconectar ao banco de dados e retorna a nova conexão."""
     try:
-        client = pymongo.MongoClient(mongo_config['uri'])
-        db = client[mongo_config['db_name']]
-        collection = db[mongo_config['collection_name']]
-        logging.info("Conectado ao MongoDB.")
-        return client, collection
-    except pymongo.errors.ConnectionFailure as e:
-        logging.error(f"Falha ao conectar ao MongoDB: {e}", exc_info=True)
-        return None, None
+        connection = mariadb.connect(**db_config)
+        logging.info("Reconectado ao banco de dados.")
+        return connection
+    except mariadb.Error as e:
+        logging.error(f"Falha ao reconectar ao banco de dados: {e}", exc_info=True)
+        return None
+
 
 def insert_logs_to_db(log_queue):
     """Subprocesso que consome logs da fila e insere no banco de dados."""
-    client, collection = connect_to_mongodb()
-    if not client:
-        logging.error("Não foi possível conectar ao MongoDB. Encerrando subprocesso.")
-        return
+    connection = mariadb.connect(**db_config)
+    logging.info("Conectado ao banco de dados.")
 
     while True:
         try:
@@ -81,25 +81,32 @@ def insert_logs_to_db(log_queue):
             if not logs:
                 continue
 
-            # Inserir os logs no MongoDB
-            collection.insert_many(logs)
-            logging.info(f"{len(logs)} logs inseridos no MongoDB.")
+            # Inserir os logs no banco de dados
+            with connection.cursor() as cursor:
+                insert_query = """
+                INSERT INTO access_logs (timestamp, server_tag, ip_address, user, status_code, url, date, user_agent, hostname)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.executemany(insert_query, logs)
+                connection.commit()
+            logging.info(f"{len(logs)} logs inseridos no banco de dados.")
 
-        except pymongo.errors.PyMongoError as e:
-            logging.error(f"Erro no MongoDB: {e}", exc_info=True)
+        except mariadb.Error as e:
+            logging.error(f"Erro no banco de dados: {e}", exc_info=True)
             # Tentar reconectar ao banco
-            client, collection = connect_to_mongodb()
-            if not client:
-                logging.error("Reconexão ao MongoDB falhou. Encerrando subprocesso.")
+            connection = reconnect_to_db()
+            if not connection:
+                logging.error("Reconexão ao banco de dados falhou. Encerrando subprocesso.")
                 break  # Encerra o subprocesso se não for possível reconectar
         except Empty:
             logging.debug("Nenhum log disponível na fila dentro do timeout.")
         except Exception as e:
             logging.error(f"Erro inesperado no subprocesso de inserção: {e}", exc_info=True)
 
-    if client:
-        client.close()
-        logging.info("Conexão com MongoDB encerrada.")
+    if connection:
+        connection.close()
+        logging.info("Conexão com banco de dados encerrada.")
+
 
 def main():
     """Função principal para receber logs e enviar para o subprocesso."""
@@ -122,13 +129,16 @@ def main():
                 parsed = parse_log_line(log_message)
 
                 if parsed:
-                    # Adicionar o ano ao valor de parsed['date']
+                     # Adicionar o ano ao valor de parsed['date']
                     log_date_str = parsed['date']  # Formato: "Nov 21 15:55:12"
                     current_year = datetime.now().year  # Obter o ano atual
-                    parsed['date'] = f"{log_date_str} {current_year}"  # Adicionar o ano
-
-                    # Adicionar ao batch
-                    logs_batch.append(parsed)
+                    log_date_with_year = f"{log_date_str} {current_year}"  # Adicionar o ano
+                                      
+                     # Adicionar ao batch
+                    logs_batch.append((
+                        parsed['timestamp'], parsed['server_tag'], parsed['ip_address'], parsed['user'],
+                        parsed['status_code'], parsed['url'], log_date_with_year, parsed['user_agent'], parsed['hostname']
+                    ))
 
                 # Enviar lote de logs para a fila
                 if len(logs_batch) >= batch_size:
